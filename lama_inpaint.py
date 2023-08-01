@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "lama"))
 from saicinpainting.evaluation.utils import move_to_device
 from saicinpainting.training.trainers import load_checkpoint
 from saicinpainting.evaluation.data import pad_tensor_to_modulo
+from saicinpainting.evaluation.refinement import refine_predict
 
 from utils import load_img_to_array, save_array_to_img
 
@@ -30,7 +31,7 @@ def inpaint_img_with_lama(
         config_p: str,
         ckpt_p: str,
         mod=8,
-        device="cuda"
+        device="cuda",
 ):
     assert len(mask.shape) == 2
     if np.max(mask) == 1:
@@ -58,7 +59,8 @@ def inpaint_img_with_lama(
     model = load_checkpoint(
         train_config, checkpoint_path, strict=False, map_location='cpu')
     model.freeze()
-    if not predict_config.get('refine', False):
+    # if not refine setted in the config.yaml then True
+    if not predict_config.get('refine', True):
         model.to(device)
 
     batch = {}
@@ -70,13 +72,22 @@ def inpaint_img_with_lama(
     batch = move_to_device(batch, device)
     batch['mask'] = (batch['mask'] > 0) * 1
 
-    batch = model(batch)
-    cur_res = batch[predict_config.out_key][0].permute(1, 2, 0)
-    cur_res = cur_res.detach().cpu().numpy()
+    # default using refine mode
+    if predict_config.get('refine', True):
+            assert 'unpad_to_size' in batch, "Unpadded size is required for the refinement"
+            # image unpadding is taken care of in the refiner, so that output image
+            # is same size as the input image
+            cur_res = refine_predict(batch, model, **predict_config.refiner)
+            cur_res = cur_res[0].permute(1,2,0).detach().cpu().numpy()
+    else:
+        with torch.no_grad():
+            batch = model(batch)
+            cur_res = batch[predict_config.out_key][0].permute(1, 2, 0)
+            cur_res = cur_res.detach().cpu().numpy()
 
-    if unpad_to_size is not None:
-        orig_height, orig_width = unpad_to_size
-        cur_res = cur_res[:orig_height, :orig_width]
+            if unpad_to_size is not None:
+                orig_height, orig_width = unpad_to_size
+                cur_res = cur_res[:orig_height, :orig_width]
 
     cur_res = np.clip(cur_res * 255, 0, 255).astype('uint8')
     return cur_res
